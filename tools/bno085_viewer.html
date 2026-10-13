@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BNO085 3D Viewer</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b35; --text: #e6e8ec; --muted: #8b93a3;
+    --accent: #7c5cff; --ok: #2fbf71; --warn: #e3a23b; --bad: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  #app { display: grid; grid-template-columns: 1fr 320px; height: 100vh; }
+  #view { position: relative; min-width: 0; }
+  #view canvas { display: block; width: 100%; height: 100%; }
+  #hint { position: absolute; left: 16px; bottom: 16px; color: var(--muted); font-size: 12px; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); padding: 16px; overflow-y: auto; }
+  h1 { font-size: 16px; margin: 0 0 12px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button, select { background: #222734; color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 12px; font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  #status { margin-top: 10px; font-size: 13px; color: var(--muted); }
+  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
+  .big { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .big div { background: #1e222c; border-radius: 10px; padding: 10px; text-align: center; }
+  .big b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .big span { font-size: 11px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 4px 0; border-bottom: 1px solid var(--line); }
+  td:last-child { text-align: right; }
+  .acc { display: inline-block; min-width: 22px; padding: 1px 6px; border-radius: 6px; font-size: 12px; text-align: center; color: #fff; }
+  .a0 { background: var(--bad); } .a1 { background: var(--warn); } .a2 { background: #3b82c4; } .a3 { background: var(--ok); }
+  #raw { font: 11px/1.35 ui-monospace, Menlo, monospace; color: var(--muted); background: #12151b; border-radius: 8px;
+    padding: 8px; height: 140px; overflow: hidden; white-space: pre; }
+  .note { font-size: 12px; color: var(--muted); }
+  @media (max-width: 800px) { #app { grid-template-columns: 1fr; grid-template-rows: 55vh auto; }
+    aside { border-left: 0; border-top: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="view"><div id="hint">Sürükle: kamerayı döndür · Tekerlek: yakınlaştır</div></div>
+  <aside>
+    <h1>BNO085 3D Viewer</h1>
+    <div class="row">
+      <select id="baud">
+        <option>115200</option><option>230400</option><option>460800</option><option>921600</option>
+      </select>
+      <button id="connect" class="primary">Bağlan</button>
+      <button id="disconnect" disabled>Kes</button>
+    </div>
+    <div id="status">Bağlı değil. Seri port başka bir programda açıksa (logger, VS Code Serial Monitor) önce onu kapat.</div>
+
+    <h2>Yönelim</h2>
+    <div class="big">
+      <div><b id="yaw">–</b><span>yaw °</span></div>
+      <div><b id="pitch">–</b><span>pitch °</span></div>
+      <div><b id="roll">–</b><span>roll °</span></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="tare">Sıfırla (tare)</button>
+      <button id="untare">Tare'i kaldır</button>
+    </div>
+
+    <h2>Durum</h2>
+    <table>
+      <tr><td>RV accuracy</td><td><span id="rvacc" class="acc">–</span> <span id="rvdeg">–</span></td></tr>
+      <tr><td>İvme |a| (m/s²)</td><td><span id="amag">–</span> <span id="aacc" class="acc">–</span></td></tr>
+      <tr><td>Gyro (°/s)</td><td><span id="gyro">–</span> <span id="gacc" class="acc">–</span></td></tr>
+      <tr><td>Mag |B| (µT)</td><td><span id="bmag">–</span> <span id="macc" class="acc">–</span></td></tr>
+      <tr><td>Gelen yönelim satırı</td><td><span id="rate">–</span> Hz</td></tr>
+    </table>
+
+    <h2>Ham çıktı</h2>
+    <div id="raw"></div>
+    <p class="note">Firmware şu an yönelimi 10 Hz basıyor; ekran arada yumuşatıyor. Daha akıcı görüntü için firmware'e
+      <code>Q,w,x,y,z,acc</code> biçiminde hızlı bir satır eklenirse bu sayfa onu da otomatik okur.</p>
+  </aside>
+</div>
+
+<!-- Önce yandaki yerel kopya (internetsiz çalışsın), yoksa CDN -->
+<script src="three.min.js"></script>
+<script>window.THREE || document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>');</script>
+<script>
+// ---------- 3D sahne ----------
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1115);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 0.7); sun.position.set(3, 5, 4); scene.add(sun);
+const grid = new THREE.GridHelper(10, 20, 0x333a48, 0x232833); grid.position.y = -1.2; scene.add(grid);
+
+// Kamera: basit orbit (sürükle + tekerlek)
+let camYaw = 0.7, camPitch = 0.45, camDist = 6;
+function placeCamera() {
+  camera.position.set(camDist * Math.cos(camPitch) * Math.sin(camYaw), camDist * Math.sin(camPitch),
+                      camDist * Math.cos(camPitch) * Math.cos(camYaw));
+  camera.lookAt(0, 0, 0);
+}
+let drag = null;
+renderer.domElement.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; });
+window.addEventListener('pointerup', () => drag = null);
+window.addEventListener('pointermove', e => {
+  if (!drag) return;
+  camYaw -= (e.clientX - drag.x) * 0.008;
+  camPitch = Math.max(-1.3, Math.min(1.3, camPitch + (e.clientY - drag.y) * 0.008));
+  drag = { x: e.clientX, y: e.clientY }; placeCamera();
+});
+renderer.domElement.addEventListener('wheel', e => {
+  e.preventDefault(); camDist = Math.max(3, Math.min(15, camDist * (e.deltaY > 0 ? 1.1 : 0.9))); placeCamera();
+}, { passive: false });
+placeCamera();
+
+// Sensör modeli: GY-BNO08X kartı gibi mor bir PCB + çip + header + eksen okları.
+// Model, SENSÖR eksenlerinde kurulur (x, y yatay; z yukarı) ve "board" grubunun içine konur.
+const board = new THREE.Group();
+const sensorFrame = new THREE.Group();          // sensör ekseni -> three.js ekseni dönüşümü
+sensorFrame.rotation.x = -Math.PI / 2;          // sensör z (yukarı) -> three y (yukarı)
+board.add(sensorFrame);
+scene.add(board);
+
+const pcb = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.0, 0.12),
+  new THREE.MeshStandardMaterial({ color: 0x7a2fa0, roughness: 0.6 }));
+sensorFrame.add(pcb);
+const chip = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.55, 0.12),
+  new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.4 }));
+chip.position.set(0.1, 0.1, 0.12); sensorFrame.add(chip);
+for (let i = 0; i < 10; i++) {               // header pinleri (kartın bir kenarı)
+  const pin = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.06, 0.5),
+    new THREE.MeshStandardMaterial({ color: 0xd4af37, metalness: 0.8, roughness: 0.3 }));
+  pin.position.set(-1.15, -0.9 + i * 0.2, -0.25); sensorFrame.add(pin);
+}
+function arrow(dir, color, label) {
+  const a = new THREE.ArrowHelper(dir, new THREE.Vector3(0, 0, 0.1), 1.9, color, 0.25, 0.14);
+  sensorFrame.add(a);
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d'); g.fillStyle = '#' + color.toString(16).padStart(6, '0');
+  g.font = 'bold 44px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(label, 32, 34);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c) }));
+  s.scale.set(0.35, 0.35, 0.35); s.position.copy(dir.clone().multiplyScalar(2.15)).add(new THREE.Vector3(0, 0, 0.1));
+  sensorFrame.add(s);
+}
+arrow(new THREE.Vector3(1, 0, 0), 0xe5484d, 'X');
+arrow(new THREE.Vector3(0, 1, 0), 0x2fbf71, 'Y');
+arrow(new THREE.Vector3(0, 0, 1), 0x3b82c4, 'Z');
+
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize); resize();
+
+// ---------- Quaternion: sensör dünyası -> three.js dünyası ----------
+// BNO085 dünya çerçevesi Z-yukarı. three.js Y-yukarı. Eşleme: x->x, y->-z, z->y (det = +1, gerçek dönüş).
+// Aynı eşleme quaternion'un vektör kısmına uygulanır; sensör gövdesindeki model de sensorFrame ile
+// aynı şekilde döndürüldüğü için ikisi tutarlı kalır.
+const target = new THREE.Quaternion();
+const current = new THREE.Quaternion();
+const tare = new THREE.Quaternion();          // birim = tare yok
+let haveData = false;
+
+function setSensorQuat(w, x, y, z) {
+  const q = new THREE.Quaternion(x, z, -y, w).normalize();
+  // sensorFrame zaten sensör z'yi three y'ye çeviriyor; board grubuna dünya dönüşünü
+  // "sensorFrame^-1 * q * sensorFrame" yerine doğrudan q olarak veriyoruz, çünkü sensorFrame
+  // modelin kendi içindeki sabit dönüşü ve q da aynı eşlemeyle three dünyasına taşındı.
+  target.copy(tare).multiply(q);
+  if (!haveData) { current.copy(target); haveData = true; }
+}
+
+document.getElementById('tare').onclick = () => {
+  // Şu anki yönelimi "düz, kameraya bakıyor" kabul et.
+  const raw = tare.clone().invert().multiply(target);  // tare'siz ham yönelim
+  tare.copy(raw).invert(); target.copy(tare).multiply(raw);
+};
+document.getElementById('untare').onclick = () => {
+  const raw = tare.clone().invert().multiply(target);
+  tare.identity(); target.copy(raw);
+};
+
+function animate() {
+  requestAnimationFrame(animate);
+  current.slerp(target, 0.25);
+  board.quaternion.copy(current);
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---------- Seri port ----------
+const $ = id => document.getElementById(id);
+const statusEl = $('status');
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ''; }
+function accBadge(el, a) { el.textContent = a; el.className = 'acc a' + Math.max(0, Math.min(3, a | 0)); }
+
+const reCompact = /^Q,([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)(?:,(\d))?/;
+const reQ   = /q\(w,x,y,z\)=\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)/;
+const reYPR = /yaw=\s*([-\d.]+)\s+pitch=\s*([-\d.]+)\s+roll=\s*([-\d.]+)/;
+const reRvAcc = /acc=(\d)\s*\+-\s*([\d.]+)\s*deg/;
+const reImu = /ivme=\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)[^|]*\|a\|=\s*([\d.]+)\s+acc=(\d).*?gyro=\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+)\s*dps\s+acc=(\d)(?:.*?\|B\|=\s*([\d.]+)\s*uT\s+acc=(\d))?/;
+
+const rawLines = [];
+let qCount = 0, qT0 = performance.now();
+
+function eulerFromSensorQuat(w, x, y, z) {   // firmware ile aynı ZYX formülü
+  const D = 180 / Math.PI;
+  const sinp = Math.max(-1, Math.min(1, 2 * (w * y - z * x)));
+  return {
+    yaw: Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)) * D,
+    pitch: Math.asin(sinp) * D,
+    roll: Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)) * D,
+  };
+}
+
+function handleLine(line) {
+  rawLines.push(line); if (rawLines.length > 10) rawLines.shift();
+  let m;
+  if ((m = reCompact.exec(line)) || (m = reQ.exec(line))) {
+    const [w, x, y, z] = [m[1], m[2], m[3], m[4]].map(Number);
+    setSensorQuat(w, x, y, z); qCount++;
+    const e = eulerFromSensorQuat(w, x, y, z);
+    $('yaw').textContent = e.yaw.toFixed(1);
+    $('pitch').textContent = e.pitch.toFixed(1);
+    $('roll').textContent = e.roll.toFixed(1);
+    if (m[5] !== undefined && reCompact.test(line)) accBadge($('rvacc'), +m[5]);
+  }
+  if ((m = reRvAcc.exec(line)) && reQ.test(line)) { accBadge($('rvacc'), +m[1]); $('rvdeg').textContent = '±' + m[2] + '°'; }
+  if ((m = reImu.exec(line))) {
+    $('amag').textContent = (+m[4]).toFixed(2); accBadge($('aacc'), +m[5]);
+    $('gyro').textContent = [m[6], m[7], m[8]].map(v => (+v).toFixed(1)).join(', '); accBadge($('gacc'), +m[9]);
+    if (m[10] !== undefined) { $('bmag').textContent = (+m[10]).toFixed(1); accBadge($('macc'), +m[11]); }
+  }
+}
+
+setInterval(() => {
+  const now = performance.now();
+  $('rate').textContent = (qCount * 1000 / (now - qT0)).toFixed(1);
+  qCount = 0; qT0 = now;
+  $('raw').textContent = rawLines.join('\n');
+}, 1000);
+
+let port = null, reader = null, keepReading = false;
+
+async function connect() {
+  if (!('serial' in navigator)) {
+    setStatus('Bu tarayıcı Web Serial desteklemiyor. Chrome ya da Edge kullan.', 'bad'); return;
+  }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: +$('baud').value });
+  } catch (err) {
+    setStatus('Port açılamadı: ' + err.message + ' (port başka bir programda açık olabilir)', 'bad'); port = null; return;
+  }
+  setStatus('Bağlandı, veri bekleniyor…', 'ok');
+  $('connect').disabled = true; $('disconnect').disabled = false;
+  keepReading = true;
+  const decoder = new TextDecoderStream();
+  const closed = port.readable.pipeTo(decoder.writable).catch(() => {});
+  reader = decoder.readable.getReader();
+  let buf = '';
+  try {
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).replace(/\r$/, ''); buf = buf.slice(i + 1);
+        if (line) handleLine(line);
+      }
+      if (buf.length > 4096) buf = '';
+    }
+  } catch (err) {
+    setStatus('Bağlantı koptu: ' + err.message, 'bad');
+  } finally {
+    try { reader.releaseLock(); } catch (_) {}
+    await closed;
+    try { await port.close(); } catch (_) {}
+    port = null; $('connect').disabled = false; $('disconnect').disabled = true;
+    if (statusEl.className !== 'bad') setStatus('Bağlantı kapatıldı.');
+  }
+}
+
+async function disconnect() {
+  keepReading = false;
+  try { await reader.cancel(); } catch (_) {}
+}
+
+$('connect').onclick = connect;
+$('disconnect').onclick = disconnect;
+</script>
+</body>
+</html>
